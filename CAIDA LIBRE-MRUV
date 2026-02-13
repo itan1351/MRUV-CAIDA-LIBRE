@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Simulador: Tiro Vertical</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+    .panel { border: 1px solid #ddd; border-radius: 10px; padding: 12px; }
+    canvas { background: #fafafa; border: 1px solid #ddd; border-radius: 10px; }
+    label { display:block; margin-top: 8px; }
+    input[type="range"] { width: 260px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    button { padding: 8px 12px; border-radius: 10px; border: 1px solid #ccc; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h2>Simulador: Lanzamiento vertical hacia arriba (MRUV / Caída libre)</h2>
+
+  <div class="row">
+    <div class="panel">
+      <h3>Controles</h3>
+
+      <label>Velocidad inicial v0: <span id="v0Label" class="mono"></span> m/s</label>
+      <input id="v0" type="range" min="5" max="60" step="0.5" value="35">
+
+      <label>Gravedad g: <span id="gLabel" class="mono"></span> m/s²</label>
+      <input id="g" type="range" min="1" max="20" step="0.1" value="9.8">
+
+      <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
+        <button id="startBtn">Iniciar</button>
+        <button id="pauseBtn">Pausa</button>
+        <button id="resetBtn">Reiniciar</button>
+      </div>
+
+      <h3>Resultados</h3>
+      <div class="mono" id="info"></div>
+      <p style="max-width:340px;">
+        Ecuaciones:
+        <span class="mono">y(t)=v0·t - 0.5·g·t²</span>,
+        <span class="mono">v(t)=v0 - g·t</span>.
+      </p>
+    </div>
+
+    <div class="panel">
+      <h3>Animación</h3>
+      <canvas id="sim" width="360" height="420"></canvas>
+    </div>
+
+    <div class="panel">
+      <h3>Gráfica y(t)</h3>
+      <canvas id="plot" width="420" height="420"></canvas>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const sim = document.getElementById("sim");
+  const sctx = sim.getContext("2d");
+  const plot = document.getElementById("plot");
+  const pctx = plot.getContext("2d");
+
+  const v0Slider = document.getElementById("v0");
+  const gSlider = document.getElementById("g");
+  const v0Label = document.getElementById("v0Label");
+  const gLabel = document.getElementById("gLabel");
+  const info = document.getElementById("info");
+
+  const startBtn = document.getElementById("startBtn");
+  const pauseBtn = document.getElementById("pauseBtn");
+  const resetBtn = document.getElementById("resetBtn");
+
+  let running = false;
+  let t = 0;
+  let last = null;
+  let samples = [];
+
+  function readParams() {
+    const v0 = parseFloat(v0Slider.value);
+    const g = parseFloat(gSlider.value);
+    v0Label.textContent = v0.toFixed(1);
+    gLabel.textContent = g.toFixed(1);
+    return { v0, g };
+  }
+
+  function yOf(t, v0, g) {
+    return v0*t - 0.5*g*t*t;
+  }
+  function vOf(t, v0, g) {
+    return v0 - g*t;
+  }
+
+  function totalTime(v0, g) {
+    // y(t)=0 => t=0 o t=2v0/g
+    return 2*v0/g;
+  }
+
+  function maxHeight(v0, g) {
+    // hmax = v0^2 / (2g)
+    return (v0*v0)/(2*g);
+  }
+
+  function reset() {
+    running = false;
+    t = 0;
+    last = null;
+    samples = [];
+    drawAll();
+  }
+
+  function drawSim(v0, g) {
+    sctx.clearRect(0,0,sim.width,sim.height);
+
+    // Piso
+    sctx.fillStyle = "#333";
+    sctx.fillRect(40, sim.height-40, sim.width-80, 4);
+
+    // Escala vertical (metros a pixeles)
+    const hmax = maxHeight(v0, g);
+    const marginTop = 30;
+    const marginBottom = 45;
+    const usable = sim.height - marginTop - marginBottom;
+    const metersToPx = usable / (hmax * 1.15 + 0.001); // 15% extra
+
+    const y = yOf(t, v0, g);
+    const clampedY = Math.max(0, y);
+
+    const xBall = sim.width/2;
+    const yBall = sim.height - marginBottom - clampedY * metersToPx;
+
+    // Guía de altura máxima
+    sctx.strokeStyle = "#bbb";
+    sctx.setLineDash([6,6]);
+    const yMaxLine = sim.height - marginBottom - hmax*metersToPx;
+    sctx.beginPath();
+    sctx.moveTo(60, yMaxLine);
+    sctx.lineTo(sim.width-60, yMaxLine);
+    sctx.stroke();
+    sctx.setLineDash([]);
+
+    sctx.fillStyle = "#000";
+    sctx.font = "12px Arial";
+    sctx.fillText("h máx ≈ " + hmax.toFixed(2) + " m", 60, yMaxLine - 6);
+
+    // Pelota
+    sctx.beginPath();
+    sctx.arc(xBall, yBall, 10, 0, Math.PI*2);
+    sctx.fillStyle = "#1f2937";
+    sctx.fill();
+
+    // Texto
+    const v = vOf(t, v0, g);
+    sctx.fillStyle = "#000";
+    sctx.font = "13px Arial";
+    sctx.fillText("t = " + t.toFixed(2) + " s", 16, 20);
+    sctx.fillText("y = " + y.toFixed(2) + " m", 16, 38);
+    sctx.fillText("v = " + v.toFixed(2) + " m/s", 16, 56);
+
+    // Eje
+    sctx.strokeStyle = "#ccc";
+    sctx.beginPath();
+    sctx.moveTo(40, marginTop);
+    sctx.lineTo(40, sim.height - marginBottom);
+    sctx.stroke();
+    sctx.fillText("y", 30, marginTop+10);
+  }
+
+  function drawPlot(v0, g) {
+    pctx.clearRect(0,0,plot.width,plot.height);
+
+    const T = totalTime(v0, g);
+    const hmax = maxHeight(v0, g);
+
+    const pad = 40;
+    const W = plot.width - 2*pad;
+    const H = plot.height - 2*pad;
+
+    // Ejes
+    pctx.strokeStyle = "#aaa";
+    pctx.beginPath();
+    // x-axis
+    pctx.moveTo(pad, plot.height - pad);
+    pctx.lineTo(plot.width - pad, plot.height - pad);
+    // y-axis
+    pctx.moveTo(pad, plot.height - pad);
+    pctx.lineTo(pad, pad);
+    pctx.stroke();
+
+    pctx.fillStyle = "#000";
+    pctx.font = "12px Arial";
+    pctx.fillText("t (s)", plot.width/2 - 10, plot.height - 12);
+    pctx.fillText("y (m)", 8, plot.height/2);
+
+    // Curva teórica
+    pctx.strokeStyle = "#111";
+    pctx.beginPath();
+    const N = 250;
+    for (let i=0;i<=N;i++){
+      const tt = (i/N)*T;
+      const yy = yOf(tt, v0, g);
+      const x = pad + (tt/T)*W;
+      const y = plot.height - pad - (yy/hmax)*H;
+      if(i===0) pctx.moveTo(x,y);
+      else pctx.lineTo(x,y);
+    }
+    pctx.stroke();
+
+    // Puntos simulados
+    if (samples.length > 1) {
+      pctx.strokeStyle = "#555";
+      pctx.beginPath();
+      for (let i=0;i<samples.length;i++){
+        const tt = samples[i].t;
+        const yy = samples[i].y;
+        const x = pad + (tt/T)*W;
+        const y = plot.height - pad - (yy/hmax)*H;
+        if(i===0) pctx.moveTo(x,y);
+        else pctx.lineTo(x,y);
+      }
+      pctx.stroke();
+    }
+
+    // Punto actual
+    const yNow = yOf(t, v0, g);
+    const xNow = pad + (t/T)*W;
+    const yNowPx = plot.height - pad - (yNow/hmax)*H;
+
+    pctx.beginPath();
+    pctx.arc(xNow, yNowPx, 5, 0, Math.PI*2);
+    pctx.fillStyle = "#111";
+    pctx.fill();
+
+    // Marcas
+    pctx.fillStyle = "#000";
+    pctx.fillText("0", pad-10, plot.height-pad+14);
+    pctx.fillText(T.toFixed(2), plot.width-pad-18, plot.height-pad+14);
+    pctx.fillText(hmax.toFixed(2), pad-34, pad+4);
+  }
+
+  function updateInfo(v0, g) {
+    const T = totalTime(v0, g);
+    const tUp = v0/g;
+    const hmax = maxHeight(v0, g);
+
+    info.innerHTML =
+      "Tiempo total T = 2·v0/g = " + T.toFixed(3) + " s<br>" +
+      "Tiempo de subida = v0/g = " + tUp.toFixed(3) + " s<br>" +
+      "Altura máxima = v0²/(2g) = " + hmax.toFixed(3) + " m<br>";
+  }
+
+  function drawAll() {
+    const {v0, g} = readParams();
+    updateInfo(v0, g);
+    drawSim(v0, g);
+    drawPlot(v0, g);
+  }
+
+  function step(ts) {
+    if (!running) { last = null; return; }
+    const {v0, g} = readParams();
+    const T = totalTime(v0, g);
+
+    if (last === null) last = ts;
+    const dt = Math.min(0.03, (ts - last)/1000); // seguridad
+    last = ts;
+
+    t += dt;
+
+    const y = yOf(t, v0, g);
+
+    // Guardar puntos para la gráfica mientras esté en el aire
+    if (y >= 0 && t <= T + 0.2) {
+      samples.push({t: t, y: y});
+      if (samples.length > 800) samples.shift();
+    }
+
+    // Si toca el suelo, detener
+    if (t >= T) {
+      t = T;
+      running = false;
+    }
+
+    drawAll();
+    requestAnimationFrame(step);
+  }
+
+  // Eventos
+  v0Slider.addEventListener("input", drawAll);
+  gSlider.addEventListener("input", drawAll);
+
+  startBtn.addEventListener("click", () => {
+    if (!running) {
+      running = true;
+      requestAnimationFrame(step);
+    }
+  });
+
+  pauseBtn.addEventListener("click", () => {
+    running = false;
+    last = null;
+  });
+
+  resetBtn.addEventListener("click", reset);
+
+  // Inicial
+  drawAll();
+})();
+</script>
+</body>
+</html>
